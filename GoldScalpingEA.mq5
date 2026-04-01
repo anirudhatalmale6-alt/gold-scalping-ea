@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.03"
+#property version   "1.04"
 
 #include <Trade\Trade.mqh>
 
@@ -39,7 +39,7 @@ input int             InpTimeEndMinute     = 59;                // Time End Minu
 // Market Activity Filter
 input int             InpATRPeriod         = 14;                // ATR Period
 input double          InpATRThreshold      = 0.0;               // ATR Min Threshold (0=off)
-input int             InpMaxSpread         = 20;                // Max Spread (0=off)
+input int             InpMaxSpread         = 50;                // Max Spread (0=off)
 
 // Display
 input bool            InpDisplayText       = true;              // Display Text on Chart
@@ -88,7 +88,7 @@ int OnInit()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
       Print("WARNING: Algo Trading is NOT enabled! Enable it in MT5 toolbar and EA properties.");
 
-   Print(g_eaName, " v1.03 initialized. TimeFilter=", InpTimeFilter,
+   Print(g_eaName, " v1.04 initialized. TimeFilter=", InpTimeFilter,
          " TradeMode=", EnumToString(InpTradeMode),
          " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
@@ -235,14 +235,17 @@ bool CheckFilters()
 //+------------------------------------------------------------------+
 int DetectTrend()
 {
+   // Use current price vs last 2 closes for faster detection
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double close1 = iClose(_Symbol, PERIOD_CURRENT, 1);
    double close2 = iClose(_Symbol, PERIOD_CURRENT, 2);
-   double close3 = iClose(_Symbol, PERIOD_CURRENT, 3);
 
-   if(close1 > close2 && close2 > close3)
+   // Rising: current price > close1 > close2
+   if(currentBid > close1 && close1 > close2)
       return 1;   // Uptrend
 
-   if(close1 < close2 && close2 < close3)
+   // Falling: current price < close1 < close2
+   if(currentBid < close1 && close1 < close2)
       return -1;  // Downtrend
 
    return 0;
