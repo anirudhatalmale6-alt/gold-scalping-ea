@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.02"
+#property version   "1.03"
 
 #include <Trade\Trade.mqh>
 
@@ -30,11 +30,11 @@ input int             InpSlippage          = 10;                // Slippage (poi
 input ENUM_TRADE_MODE InpTradeMode         = TRADE_MODE_SINGLE; // Trade Mode
 
 // Session Filter
-input bool            InpTimeFilter        = true;              // Time Running
+input bool            InpTimeFilter        = false;             // Time Running
 input int             InpTimeStartHour     = 0;                 // Time Start Hour
 input int             InpTimeStartMinute   = 0;                 // Time Start Minute
-input int             InpTimeEndHour       = 5;                 // Time End Hour
-input int             InpTimeEndMinute     = 0;                 // Time End Minute
+input int             InpTimeEndHour       = 23;                // Time End Hour
+input int             InpTimeEndMinute     = 59;                // Time End Minute
 
 // Market Activity Filter
 input int             InpATRPeriod         = 14;                // ATR Period
@@ -84,7 +84,13 @@ int OnInit()
 
    CalcDailyStats();
 
-   Print(g_eaName, " initialized successfully");
+   // Check if algo trading is enabled
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+      Print("WARNING: Algo Trading is NOT enabled! Enable it in MT5 toolbar and EA properties.");
+
+   Print(g_eaName, " v1.03 initialized. TimeFilter=", InpTimeFilter,
+         " TradeMode=", EnumToString(InpTradeMode),
+         " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
 }
 
@@ -145,18 +151,41 @@ void OnTick()
       TrailPendingOrders();
 
    // --- Place new pending orders if filters pass ---
-   if(filtersPass)
+   if(!filtersPass)
    {
-      if(InpTradeMode == TRADE_MODE_SINGLE)
+      // Log why filters are blocking (only once per minute to avoid spam)
+      static datetime lastLog = 0;
+      if(TimeCurrent() - lastLog >= 60)
       {
-         if(openPositions == 0 && pendingOrders == 0)
-            PlacePendingOrder();
+         lastLog = TimeCurrent();
+         Print("EA PAUSED - Filters not passing. TimeFilter=", InpTimeFilter,
+               " ATR=", g_atrValue, " Threshold=", InpATRThreshold,
+               " Spread=", SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), " MaxSpread=", InpMaxSpread);
       }
-      else
+      return;
+   }
+
+   if(InpTradeMode == TRADE_MODE_SINGLE)
+   {
+      if(openPositions == 0 && pendingOrders == 0)
       {
-         if(pendingOrders == 0)
-            PlacePendingOrder();
+         int trend = DetectTrend();
+         if(trend == 0)
+         {
+            static datetime lastTrendLog = 0;
+            if(TimeCurrent() - lastTrendLog >= 60)
+            {
+               lastTrendLog = TimeCurrent();
+               Print("No clear trend detected - waiting for 3 consecutive candles");
+            }
+         }
+         PlacePendingOrder();
       }
+   }
+   else
+   {
+      if(pendingOrders == 0)
+         PlacePendingOrder();
    }
 }
 
