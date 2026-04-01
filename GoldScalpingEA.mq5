@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.05"
+#property version   "1.06"
 
 #include <Trade\Trade.mqh>
 
@@ -83,7 +83,7 @@ int OnInit()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
       Print("WARNING: Algo Trading is NOT enabled! Enable it in MT5 toolbar and EA properties.");
 
-   Print(g_eaName, " v1.05 initialized. TimeFilter=", InpTimeFilter,
+   Print(g_eaName, " v1.06 initialized. TimeFilter=", InpTimeFilter,
          " TradeMode=", EnumToString(InpTradeMode),
          " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
@@ -179,17 +179,14 @@ void OnTick()
    }
    else
    {
-      // Multiple: allow new pending orders alongside open positions
-      // Place new pending order if none exists, regardless of open positions
-      if(pendingOrders == 0)
+      // Multiple: place BOTH buy-stop and sell-stop (bracket/straddle)
+      // Buy-stop above price + Sell-stop below price simultaneously
+      bool hasBuyStop  = HasPendingOrderType(ORDER_TYPE_BUY_STOP);
+      bool hasSellStop = HasPendingOrderType(ORDER_TYPE_SELL_STOP);
+
+      if(!hasBuyStop || !hasSellStop)
       {
-         int trend = DetectTrend();
-         if(trend != 0)
-         {
-            Print("Multiple mode: placing new pending order. Open positions=", openPositions,
-                  " Trend=", (trend == 1 ? "UP" : "DOWN"));
-         }
-         PlacePendingOrder();
+         PlaceBracketOrders(hasBuyStop, hasSellStop);
       }
    }
 }
@@ -437,6 +434,69 @@ int CountPendingOrders()
          count++;
    }
    return count;
+}
+
+//+------------------------------------------------------------------+
+//| Check if a specific pending order type exists                     |
+//+------------------------------------------------------------------+
+bool HasPendingOrderType(ENUM_ORDER_TYPE checkType)
+{
+   int total = OrdersTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != g_magicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+
+      ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(orderType == checkType)
+         return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Place bracket orders (both buy-stop and sell-stop)                |
+//+------------------------------------------------------------------+
+void PlaceBracketOrders(bool hasBuyStop, bool hasSellStop)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   double trailDistance = InpBuySellTrailingPt * point;
+   long   stopsLevel   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist      = stopsLevel * point;
+
+   // Place BUY STOP above current price (catches upward move)
+   if(!hasBuyStop)
+   {
+      double buyStopPrice = NormalizeDouble(ask + trailDistance, digits);
+
+      if(buyStopPrice - ask < minDist)
+         buyStopPrice = NormalizeDouble(ask + minDist + point, digits);
+
+      if(!g_trade.BuyStop(InpLotSize, buyStopPrice, _Symbol, 0, 0, ORDER_TIME_GTC, 0, g_eaName + "_BuyStop"))
+         Print("BuyStop failed: ", g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+      else
+         Print("Multi: Buy-stop placed at ", buyStopPrice);
+   }
+
+   // Place SELL STOP below current price (catches downward move)
+   if(!hasSellStop)
+   {
+      double sellStopPrice = NormalizeDouble(bid - trailDistance, digits);
+
+      if(bid - sellStopPrice < minDist)
+         sellStopPrice = NormalizeDouble(bid - minDist - point, digits);
+
+      if(!g_trade.SellStop(InpLotSize, sellStopPrice, _Symbol, 0, 0, ORDER_TIME_GTC, 0, g_eaName + "_SellStop"))
+         Print("SellStop failed: ", g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+      else
+         Print("Multi: Sell-stop placed at ", sellStopPrice);
+   }
 }
 
 //+------------------------------------------------------------------+
