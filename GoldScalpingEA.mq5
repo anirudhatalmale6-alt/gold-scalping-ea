@@ -4,8 +4,9 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.01"
-#property strict
+#property version   "1.02"
+
+#include <Trade\Trade.mqh>
 
 //+------------------------------------------------------------------+
 //| Trade Mode Enum                                                   |
@@ -19,29 +20,29 @@ enum ENUM_TRADE_MODE
 //+------------------------------------------------------------------+
 //| Input Parameters                                                  |
 //+------------------------------------------------------------------+
-input group "=== Trade Settings ==="
-input double   InpLotSize              = 0.01;    // Lot Size
-input int      InpBuySellTrailingPt    = 100;     // Buy/Sell Trailing Point (pending order distance)
-input int      InpStopLossTrailingPt   = 150;     // Stop Loss Trailing Point (after fill)
-input int      InpSlippage             = 10;       // Slippage (points)
+// Trade Settings
+input double          InpLotSize           = 0.01;              // Lot Size
+input int             InpBuySellTrailingPt = 100;               // Buy/Sell Trailing Point
+input int             InpStopLossTrailingPt= 150;               // Stop Loss Trailing Point
+input int             InpSlippage          = 10;                // Slippage (points)
 
-input group "=== Trade Mode ==="
-input ENUM_TRADE_MODE InpTradeMode     = TRADE_MODE_SINGLE; // Trade Mode
+// Trade Mode
+input ENUM_TRADE_MODE InpTradeMode         = TRADE_MODE_SINGLE; // Trade Mode
 
-input group "=== Session Filter ==="
-input bool     InpTimeFilter          = true;     // Time Running (enable session filter)
-input int      InpTimeStartHour       = 0;        // Time Start Running (hour, server time)
-input int      InpTimeStartMinute     = 0;        // Time Start Running (minute)
-input int      InpTimeEndHour         = 5;        // Time End Running (hour, server time)
-input int      InpTimeEndMinute       = 0;        // Time End Running (minute)
+// Session Filter
+input bool            InpTimeFilter        = true;              // Time Running
+input int             InpTimeStartHour     = 0;                 // Time Start Hour
+input int             InpTimeStartMinute   = 0;                 // Time Start Minute
+input int             InpTimeEndHour       = 5;                 // Time End Hour
+input int             InpTimeEndMinute     = 0;                 // Time End Minute
 
-input group "=== Market Activity Filter ==="
-input int      InpATRPeriod           = 14;       // ATR Period
-input double   InpATRThreshold        = 0.0;      // ATR Minimum Threshold (0=disabled)
-input int      InpMaxSpread           = 20;       // Max Spread (points, 0=disabled)
+// Market Activity Filter
+input int             InpATRPeriod         = 14;                // ATR Period
+input double          InpATRThreshold      = 0.0;               // ATR Min Threshold (0=off)
+input int             InpMaxSpread         = 20;                // Max Spread (0=off)
 
-input group "=== Display ==="
-input bool     InpDisplayText         = true;     // Display Text on Chart
+// Display
+input bool            InpDisplayText       = true;              // Display Text on Chart
 
 //+------------------------------------------------------------------+
 //| Global Variables                                                  |
@@ -54,12 +55,18 @@ int            g_lastDay;
 ulong          g_pendingTicket;
 string         g_eaName = "GoldScalpingEA";
 int            g_magicNumber = 123456;
+CTrade         g_trade;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // Setup trade object
+   g_trade.SetExpertMagicNumber(g_magicNumber);
+   g_trade.SetDeviationInPoints(InpSlippage);
+   g_trade.SetTypeFilling(ORDER_FILLING_IOC);
+
    // Create ATR indicator handle
    g_atrHandle = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
    if(g_atrHandle == INVALID_HANDLE)
@@ -75,7 +82,6 @@ int OnInit()
    g_dailyLots = 0.0;
    g_dailyPnL = 0.0;
 
-   // Calculate existing daily stats from history
    CalcDailyStats();
 
    Print(g_eaName, " initialized successfully");
@@ -87,13 +93,10 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   // Release ATR handle
    if(g_atrHandle != INVALID_HANDLE)
       IndicatorRelease(g_atrHandle);
 
-   // Remove chart objects
    ObjectsDeleteAll(0, "GSE_");
-
    Print(g_eaName, " deinitialized");
 }
 
@@ -115,10 +118,11 @@ void OnTick()
 
    // --- Update ATR ---
    double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
    if(CopyBuffer(g_atrHandle, 0, 0, 1, atrBuf) > 0)
       g_atrValue = atrBuf[0];
 
-   // --- Calculate daily P&L (include open positions) ---
+   // --- Calculate daily P&L ---
    CalcDailyStats();
 
    // --- Update chart display ---
@@ -145,13 +149,11 @@ void OnTick()
    {
       if(InpTradeMode == TRADE_MODE_SINGLE)
       {
-         // Single trade mode: only one pending + one position at a time
          if(openPositions == 0 && pendingOrders == 0)
             PlacePendingOrder();
       }
       else
       {
-         // Multiple trade mode: allow new orders if no pending exists
          if(pendingOrders == 0)
             PlacePendingOrder();
       }
@@ -174,13 +176,11 @@ bool CheckFilters()
 
       if(startMinutes < endMinutes)
       {
-         // Normal range (e.g., 08:00 to 17:00)
          if(currentMinutes < startMinutes || currentMinutes >= endMinutes)
             return false;
       }
       else
       {
-         // Overnight range (e.g., 22:00 to 05:00)
          if(currentMinutes < startMinutes && currentMinutes >= endMinutes)
             return false;
       }
@@ -193,8 +193,8 @@ bool CheckFilters()
    // Spread filter
    if(InpMaxSpread > 0)
    {
-      double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-      if(spread > InpMaxSpread)
+      long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      if(currentSpread > InpMaxSpread)
          return false;
    }
 
@@ -203,7 +203,6 @@ bool CheckFilters()
 
 //+------------------------------------------------------------------+
 //| Determine trend direction based on recent price action            |
-//| Returns: +1 = uptrend (rising), -1 = downtrend (falling), 0=none |
 //+------------------------------------------------------------------+
 int DetectTrend()
 {
@@ -211,15 +210,13 @@ int DetectTrend()
    double close2 = iClose(_Symbol, PERIOD_CURRENT, 2);
    double close3 = iClose(_Symbol, PERIOD_CURRENT, 3);
 
-   // Rising: last 3 closes making higher values
    if(close1 > close2 && close2 > close3)
-      return 1;  // Uptrend
+      return 1;   // Uptrend
 
-   // Falling: last 3 closes making lower values
    if(close1 < close2 && close2 < close3)
-      return -1; // Downtrend
+      return -1;  // Downtrend
 
-   return 0; // No clear trend
+   return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -229,7 +226,7 @@ void PlacePendingOrder()
 {
    int trend = DetectTrend();
    if(trend == 0)
-      return; // No clear trend, skip
+      return;
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -237,63 +234,34 @@ void PlacePendingOrder()
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
    double trailDistance = InpBuySellTrailingPt * point;
-
-   MqlTradeRequest request = {};
-   MqlTradeResult  result  = {};
-
-   request.action     = TRADE_ACTION_PENDING;
-   request.symbol     = _Symbol;
-   request.volume     = InpLotSize;
-   request.deviation  = InpSlippage;
-   request.magic      = g_magicNumber;
-   request.type_filling = ORDER_FILLING_IOC;
+   long   stopsLevel   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist      = stopsLevel * point;
 
    if(trend == 1)
    {
       // Price rising -> place SELL STOP below current price
       double sellStopPrice = NormalizeDouble(bid - trailDistance, digits);
 
-      // Validate minimum distance
-      double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
       if(bid - sellStopPrice < minDist)
          sellStopPrice = NormalizeDouble(bid - minDist - point, digits);
 
-      request.type  = ORDER_TYPE_SELL_STOP;
-      request.price = sellStopPrice;
-      request.comment = g_eaName + "_SellStop";
+      if(!g_trade.SellStop(InpLotSize, sellStopPrice, _Symbol, 0, 0, ORDER_TIME_GTC, 0, g_eaName + "_SellStop"))
+         Print("SellStop failed: ", g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+      else
+         Print("Sell-stop placed at ", sellStopPrice);
    }
    else if(trend == -1)
    {
       // Price falling -> place BUY STOP above current price
       double buyStopPrice = NormalizeDouble(ask + trailDistance, digits);
 
-      // Validate minimum distance
-      double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
       if(buyStopPrice - ask < minDist)
          buyStopPrice = NormalizeDouble(ask + minDist + point, digits);
 
-      request.type  = ORDER_TYPE_BUY_STOP;
-      request.price = buyStopPrice;
-      request.comment = g_eaName + "_BuyStop";
-   }
-
-   if(OrderSend(request, result))
-   {
-      if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED)
-      {
-         g_pendingTicket = result.order;
-         Print("Pending order placed: ticket=", g_pendingTicket,
-               " type=", (trend == 1 ? "SELL_STOP" : "BUY_STOP"),
-               " price=", request.price);
-      }
+      if(!g_trade.BuyStop(InpLotSize, buyStopPrice, _Symbol, 0, 0, ORDER_TIME_GTC, 0, g_eaName + "_BuyStop"))
+         Print("BuyStop failed: ", g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
       else
-      {
-         Print("Order send failed: retcode=", result.retcode, " comment=", result.comment);
-      }
-   }
-   else
-   {
-      Print("OrderSend error: ", GetLastError());
+         Print("Buy-stop placed at ", buyStopPrice);
    }
 }
 
@@ -308,7 +276,8 @@ void TrailPendingOrders()
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
    double trailDistance = InpBuySellTrailingPt * point;
-   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   long   stopsLevel   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist      = stopsLevel * point;
 
    int totalOrders = OrdersTotal();
    for(int i = totalOrders - 1; i >= 0; i--)
@@ -323,56 +292,30 @@ void TrailPendingOrders()
 
       if(orderType == ORDER_TYPE_SELL_STOP)
       {
-         // Trail sell-stop upward as price rises
          double newPrice = NormalizeDouble(bid - trailDistance, digits);
 
-         // Ensure minimum distance
          if(bid - newPrice < minDist)
             newPrice = NormalizeDouble(bid - minDist - point, digits);
 
          // Only move up, never down
          if(newPrice > currentPrice)
          {
-            MqlTradeRequest request = {};
-            MqlTradeResult  result  = {};
-
-            request.action = TRADE_ACTION_MODIFY;
-            request.order  = ticket;
-            request.price  = newPrice;
-            request.type_time = ORDER_TIME_GTC;
-
-            if(OrderSend(request, result))
-            {
-               if(result.retcode == TRADE_RETCODE_DONE)
-                  Print("Sell-stop trailed up to ", newPrice);
-            }
+            if(g_trade.OrderModify(ticket, newPrice, 0, 0, ORDER_TIME_GTC, 0))
+               Print("Sell-stop trailed up to ", newPrice);
          }
       }
       else if(orderType == ORDER_TYPE_BUY_STOP)
       {
-         // Trail buy-stop downward as price falls
          double newPrice = NormalizeDouble(ask + trailDistance, digits);
 
-         // Ensure minimum distance
          if(newPrice - ask < minDist)
             newPrice = NormalizeDouble(ask + minDist + point, digits);
 
          // Only move down, never up
          if(newPrice < currentPrice)
          {
-            MqlTradeRequest request = {};
-            MqlTradeResult  result  = {};
-
-            request.action = TRADE_ACTION_MODIFY;
-            request.order  = ticket;
-            request.price  = newPrice;
-            request.type_time = ORDER_TIME_GTC;
-
-            if(OrderSend(request, result))
-            {
-               if(result.retcode == TRADE_RETCODE_DONE)
-                  Print("Buy-stop trailed down to ", newPrice);
-            }
+            if(g_trade.OrderModify(ticket, newPrice, 0, 0, ORDER_TIME_GTC, 0))
+               Print("Buy-stop trailed down to ", newPrice);
          }
       }
    }
@@ -389,7 +332,8 @@ void ManageTrailingStopLoss()
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
    double slDistance = InpStopLossTrailingPt * point;
-   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   long   stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist    = stopsLevel * point;
 
    int totalPositions = PositionsTotal();
    for(int i = totalPositions - 1; i >= 0; i--)
@@ -401,64 +345,36 @@ void ManageTrailingStopLoss()
 
       ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       double currentSL = PositionGetDouble(POSITION_SL);
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentTP = PositionGetDouble(POSITION_TP);
 
       if(posType == POSITION_TYPE_SELL)
       {
-         // For SELL: trail SL downward as price drops
-         // SL is above the price
+         // SL is above the ask price for sell
          double newSL = NormalizeDouble(ask + slDistance, digits);
 
-         // Ensure minimum distance
          if(newSL - ask < minDist)
             newSL = NormalizeDouble(ask + minDist + point, digits);
 
          // Set initial SL or move it down (never up for sell)
          if(currentSL == 0.0 || newSL < currentSL)
          {
-            MqlTradeRequest request = {};
-            MqlTradeResult  result  = {};
-
-            request.action   = TRADE_ACTION_SLTP;
-            request.position = ticket;
-            request.symbol   = _Symbol;
-            request.sl       = newSL;
-            request.tp       = 0;
-
-            if(OrderSend(request, result))
-            {
-               if(result.retcode == TRADE_RETCODE_DONE)
-                  Print("Sell trailing SL moved to ", newSL);
-            }
+            if(g_trade.PositionModify(ticket, newSL, currentTP))
+               Print("Sell trailing SL moved to ", newSL);
          }
       }
       else if(posType == POSITION_TYPE_BUY)
       {
-         // For BUY: trail SL upward as price rises
-         // SL is below the price
+         // SL is below the bid price for buy
          double newSL = NormalizeDouble(bid - slDistance, digits);
 
-         // Ensure minimum distance
          if(bid - newSL < minDist)
             newSL = NormalizeDouble(bid - minDist - point, digits);
 
          // Set initial SL or move it up (never down for buy)
          if(currentSL == 0.0 || newSL > currentSL)
          {
-            MqlTradeRequest request = {};
-            MqlTradeResult  result  = {};
-
-            request.action   = TRADE_ACTION_SLTP;
-            request.position = ticket;
-            request.symbol   = _Symbol;
-            request.sl       = newSL;
-            request.tp       = 0;
-
-            if(OrderSend(request, result))
-            {
-               if(result.retcode == TRADE_RETCODE_DONE)
-                  Print("Buy trailing SL moved to ", newSL);
-            }
+            if(g_trade.PositionModify(ticket, newSL, currentTP))
+               Print("Buy trailing SL moved to ", newSL);
          }
       }
    }
@@ -508,7 +424,6 @@ void CalcDailyStats()
    g_dailyLots = 0.0;
    g_dailyPnL  = 0.0;
 
-   // Get today's start time
    MqlDateTime dt;
    TimeCurrent(dt);
    dt.hour = 0;
@@ -516,7 +431,6 @@ void CalcDailyStats()
    dt.sec  = 0;
    datetime dayStart = StructToTime(dt);
 
-   // Check closed deals today
    if(HistorySelect(dayStart, TimeCurrent()))
    {
       int totalDeals = HistoryDealsTotal();
@@ -561,8 +475,7 @@ void CalcDailyStats()
 void UpdateDisplay()
 {
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   double slippage = InpSlippage;
+   long   spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
    int yPos = 30;
    int yStep = 20;
@@ -575,7 +488,6 @@ void UpdateDisplay()
    CreateLabel("GSE_Header", g_eaName, 15, yPos, clrGold, 12, fontName);
    yPos += yStep + 5;
 
-   // Separator
    CreateLabel("GSE_Sep1", "----------------------------", 15, yPos, clrGray, fontSize, fontName);
    yPos += yStep;
 
@@ -593,7 +505,8 @@ void UpdateDisplay()
    yPos += yStep;
 
    // ATR
-   CreateLabel("GSE_ATR", "ATR(" + IntegerToString(InpATRPeriod) + "):            " + DoubleToString(g_atrValue, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)), 15, yPos, textColor, fontSize, fontName);
+   int atrDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   CreateLabel("GSE_ATR", "ATR(" + IntegerToString(InpATRPeriod) + "):            " + DoubleToString(g_atrValue, atrDigits), 15, yPos, textColor, fontSize, fontName);
    yPos += yStep;
 
    // Slippage
@@ -602,16 +515,16 @@ void UpdateDisplay()
 
    // Spread
    color spreadColor = (InpMaxSpread > 0 && spread > InpMaxSpread) ? clrRed : textColor;
-   CreateLabel("GSE_Spread", "Spread:              " + DoubleToString(spread, 0), 15, yPos, spreadColor, fontSize, fontName);
+   CreateLabel("GSE_Spread", "Spread:              " + IntegerToString(spread), 15, yPos, spreadColor, fontSize, fontName);
    yPos += yStep;
 
-   // Separator
    CreateLabel("GSE_Sep2", "----------------------------", 15, yPos, clrGray, fontSize, fontName);
    yPos += yStep;
 
    // EA Status
-   string status = CheckFilters() ? "ACTIVE" : "PAUSED";
-   color statusColor = CheckFilters() ? clrLime : clrOrangeRed;
+   bool active = CheckFilters();
+   string status = active ? "ACTIVE" : "PAUSED";
+   color statusColor = active ? clrLime : clrOrangeRed;
    CreateLabel("GSE_Status", "Status:              " + status, 15, yPos, statusColor, fontSize, fontName);
    yPos += yStep;
 
@@ -623,7 +536,7 @@ void UpdateDisplay()
    yPos += yStep;
 
    // Trade Mode
-   string mode = InpTradeMode == TRADE_MODE_SINGLE ? "Single" : "Multiple";
+   string mode = (InpTradeMode == TRADE_MODE_SINGLE) ? "Single" : "Multiple";
    CreateLabel("GSE_Mode", "Trade Mode:          " + mode, 15, yPos, labelColor, fontSize, fontName);
 
    ChartRedraw(0);
@@ -652,11 +565,10 @@ void CreateLabel(string name, string text, int x, int y, color clr, int size, st
 }
 
 //+------------------------------------------------------------------+
-//| Trade event handler - detect when positions close                 |
+//| Trade event handler                                               |
 //+------------------------------------------------------------------+
 void OnTrade()
 {
-   // Recalculate daily stats when trade events occur
    CalcDailyStats();
 }
 //+------------------------------------------------------------------+
