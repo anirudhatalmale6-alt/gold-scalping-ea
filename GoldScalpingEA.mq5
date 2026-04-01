@@ -4,8 +4,17 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
+
+//+------------------------------------------------------------------+
+//| Trade Mode Enum                                                   |
+//+------------------------------------------------------------------+
+enum ENUM_TRADE_MODE
+{
+   TRADE_MODE_SINGLE   = 0,  // Single Trade
+   TRADE_MODE_MULTIPLE = 1   // Multiple Trade
+};
 
 //+------------------------------------------------------------------+
 //| Input Parameters                                                  |
@@ -17,7 +26,7 @@ input int      InpStopLossTrailingPt   = 150;     // Stop Loss Trailing Point (a
 input int      InpSlippage             = 10;       // Slippage (points)
 
 input group "=== Trade Mode ==="
-input bool     InpSingleTradeMode     = true;     // Single Trade Mode (true=one trade, false=multiple)
+input ENUM_TRADE_MODE InpTradeMode     = TRADE_MODE_SINGLE; // Trade Mode
 
 input group "=== Session Filter ==="
 input bool     InpTimeFilter          = true;     // Time Running (enable session filter)
@@ -134,7 +143,7 @@ void OnTick()
    // --- Place new pending orders if filters pass ---
    if(filtersPass)
    {
-      if(InpSingleTradeMode)
+      if(InpTradeMode == TRADE_MODE_SINGLE)
       {
          // Single trade mode: only one pending + one position at a time
          if(openPositions == 0 && pendingOrders == 0)
@@ -614,7 +623,7 @@ void UpdateDisplay()
    yPos += yStep;
 
    // Trade Mode
-   string mode = InpSingleTradeMode ? "Single" : "Multiple";
+   string mode = InpTradeMode == TRADE_MODE_SINGLE ? "Single" : "Multiple";
    CreateLabel("GSE_Mode", "Trade Mode:          " + mode, 15, yPos, labelColor, fontSize, fontName);
 
    ChartRedraw(0);
