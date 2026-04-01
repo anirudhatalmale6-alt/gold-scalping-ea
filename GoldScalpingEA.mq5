@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.07"
+#property version   "1.08"
 
 #include <Trade\Trade.mqh>
 
@@ -25,6 +25,7 @@ input double          InpLotSize           = 0.01;              // Lot Size
 input int             InpBuySellTrailingPt = 100;               // Buy/Sell Trailing Point
 input int             InpStopLossTrailingPt= 150;               // Stop Loss Trailing Point
 input int             InpSlippage          = 10;                // Slippage (points)
+input int             InpMagicNumber       = 123456;            // Magic Number
 
 // Trade Mode
 input ENUM_TRADE_MODE InpTradeMode         = TRADE_MODE_SINGLE; // Trade Mode
@@ -53,7 +54,6 @@ double         g_dailyLots;
 double         g_dailyPnL;
 int            g_lastDay;
 string         g_eaName = "GoldScalpingEA";
-int            g_magicNumber = 123456;
 CTrade         g_trade;
 datetime       g_lastModifyTime;     // Throttle order modifications
 double         g_lastBid;            // Track last bid for minimum move
@@ -65,7 +65,7 @@ int            g_minMovePts = 5;     // Minimum points before modifying orders
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   g_trade.SetExpertMagicNumber(g_magicNumber);
+   g_trade.SetExpertMagicNumber(InpMagicNumber);
    g_trade.SetDeviationInPoints(InpSlippage);
    g_trade.SetTypeFilling(ORDER_FILLING_IOC);
 
@@ -91,7 +91,7 @@ int OnInit()
    g_lastBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    g_lastAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-   Print(g_eaName, " v1.07 initialized. TimeFilter=", InpTimeFilter,
+   Print(g_eaName, " v1.08 initialized. Magic=", InpMagicNumber, " TimeFilter=", InpTimeFilter,
          " TradeMode=", EnumToString(InpTradeMode),
          " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
@@ -346,7 +346,7 @@ void TrailPendingOrders()
    {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0) continue;
-      if(OrderGetInteger(ORDER_MAGIC) != g_magicNumber) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
       if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
 
       ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
@@ -406,7 +406,7 @@ void ManageTrailingStopLoss()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != g_magicNumber) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
 
       ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -466,7 +466,7 @@ int CountPositions()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetInteger(POSITION_MAGIC) == g_magicNumber &&
+      if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber &&
          PositionGetString(POSITION_SYMBOL) == _Symbol)
          count++;
    }
@@ -484,7 +484,7 @@ int CountPendingOrders()
    {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0) continue;
-      if(OrderGetInteger(ORDER_MAGIC) == g_magicNumber &&
+      if(OrderGetInteger(ORDER_MAGIC) == InpMagicNumber &&
          OrderGetString(ORDER_SYMBOL) == _Symbol)
          count++;
    }
@@ -501,7 +501,7 @@ bool HasPendingOrderType(ENUM_ORDER_TYPE checkType)
    {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0) continue;
-      if(OrderGetInteger(ORDER_MAGIC) != g_magicNumber) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
       if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
 
       ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
@@ -577,13 +577,18 @@ void CalcDailyStats()
          ulong dealTicket = HistoryDealGetTicket(i);
          if(dealTicket == 0) continue;
 
-         if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == g_magicNumber &&
+         if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == InpMagicNumber &&
             HistoryDealGetString(dealTicket, DEAL_SYMBOL) == _Symbol)
          {
             ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+
+            // Count lots only for entries (not exits, to avoid double counting)
+            if(entry == DEAL_ENTRY_IN)
+               g_dailyLots += HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+
+            // Count P&L from both entries and exits
             if(entry == DEAL_ENTRY_IN || entry == DEAL_ENTRY_OUT)
             {
-               g_dailyLots += HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
                g_dailyPnL  += HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
                             + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
                             + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
@@ -597,7 +602,7 @@ void CalcDailyStats()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetInteger(POSITION_MAGIC) == g_magicNumber &&
+      if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber &&
          PositionGetString(POSITION_SYMBOL) == _Symbol)
       {
          g_dailyPnL += PositionGetDouble(POSITION_PROFIT)
