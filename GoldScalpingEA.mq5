@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.04"
+#property version   "1.05"
 
 #include <Trade\Trade.mqh>
 
@@ -52,7 +52,6 @@ double         g_atrValue;
 double         g_dailyLots;
 double         g_dailyPnL;
 int            g_lastDay;
-ulong          g_pendingTicket;
 string         g_eaName = "GoldScalpingEA";
 int            g_magicNumber = 123456;
 CTrade         g_trade;
@@ -62,12 +61,10 @@ CTrade         g_trade;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Setup trade object
    g_trade.SetExpertMagicNumber(g_magicNumber);
    g_trade.SetDeviationInPoints(InpSlippage);
    g_trade.SetTypeFilling(ORDER_FILLING_IOC);
 
-   // Create ATR indicator handle
    g_atrHandle = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
    if(g_atrHandle == INVALID_HANDLE)
    {
@@ -75,7 +72,6 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   // Initialize daily tracking
    MqlDateTime dt;
    TimeCurrent(dt);
    g_lastDay = dt.day;
@@ -84,11 +80,10 @@ int OnInit()
 
    CalcDailyStats();
 
-   // Check if algo trading is enabled
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
       Print("WARNING: Algo Trading is NOT enabled! Enable it in MT5 toolbar and EA properties.");
 
-   Print(g_eaName, " v1.04 initialized. TimeFilter=", InpTimeFilter,
+   Print(g_eaName, " v1.05 initialized. TimeFilter=", InpTimeFilter,
          " TradeMode=", EnumToString(InpTradeMode),
          " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
@@ -153,7 +148,6 @@ void OnTick()
    // --- Place new pending orders if filters pass ---
    if(!filtersPass)
    {
-      // Log why filters are blocking (only once per minute to avoid spam)
       static datetime lastLog = 0;
       if(TimeCurrent() - lastLog >= 60)
       {
@@ -167,6 +161,7 @@ void OnTick()
 
    if(InpTradeMode == TRADE_MODE_SINGLE)
    {
+      // Single: one pending + one position at a time
       if(openPositions == 0 && pendingOrders == 0)
       {
          int trend = DetectTrend();
@@ -176,7 +171,7 @@ void OnTick()
             if(TimeCurrent() - lastTrendLog >= 60)
             {
                lastTrendLog = TimeCurrent();
-               Print("No clear trend detected - waiting for 3 consecutive candles");
+               Print("No clear trend detected - waiting");
             }
          }
          PlacePendingOrder();
@@ -184,8 +179,18 @@ void OnTick()
    }
    else
    {
+      // Multiple: allow new pending orders alongside open positions
+      // Place new pending order if none exists, regardless of open positions
       if(pendingOrders == 0)
+      {
+         int trend = DetectTrend();
+         if(trend != 0)
+         {
+            Print("Multiple mode: placing new pending order. Open positions=", openPositions,
+                  " Trend=", (trend == 1 ? "UP" : "DOWN"));
+         }
          PlacePendingOrder();
+      }
    }
 }
 
@@ -194,7 +199,6 @@ void OnTick()
 //+------------------------------------------------------------------+
 bool CheckFilters()
 {
-   // Session time filter
    if(InpTimeFilter)
    {
       MqlDateTime dt;
@@ -215,11 +219,9 @@ bool CheckFilters()
       }
    }
 
-   // ATR filter
    if(InpATRThreshold > 0.0 && g_atrValue < InpATRThreshold)
       return false;
 
-   // Spread filter
    if(InpMaxSpread > 0)
    {
       long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
@@ -235,16 +237,13 @@ bool CheckFilters()
 //+------------------------------------------------------------------+
 int DetectTrend()
 {
-   // Use current price vs last 2 closes for faster detection
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double close1 = iClose(_Symbol, PERIOD_CURRENT, 1);
    double close2 = iClose(_Symbol, PERIOD_CURRENT, 2);
 
-   // Rising: current price > close1 > close2
    if(currentBid > close1 && close1 > close2)
       return 1;   // Uptrend
 
-   // Falling: current price < close1 < close2
    if(currentBid < close1 && close1 < close2)
       return -1;  // Downtrend
 
@@ -271,7 +270,6 @@ void PlacePendingOrder()
 
    if(trend == 1)
    {
-      // Price rising -> place SELL STOP below current price
       double sellStopPrice = NormalizeDouble(bid - trailDistance, digits);
 
       if(bid - sellStopPrice < minDist)
@@ -284,7 +282,6 @@ void PlacePendingOrder()
    }
    else if(trend == -1)
    {
-      // Price falling -> place BUY STOP above current price
       double buyStopPrice = NormalizeDouble(ask + trailDistance, digits);
 
       if(buyStopPrice - ask < minDist)
@@ -329,7 +326,6 @@ void TrailPendingOrders()
          if(bid - newPrice < minDist)
             newPrice = NormalizeDouble(bid - minDist - point, digits);
 
-         // Only move up, never down
          if(newPrice > currentPrice)
          {
             if(g_trade.OrderModify(ticket, newPrice, 0, 0, ORDER_TIME_GTC, 0))
@@ -343,7 +339,6 @@ void TrailPendingOrders()
          if(newPrice - ask < minDist)
             newPrice = NormalizeDouble(ask + minDist + point, digits);
 
-         // Only move down, never up
          if(newPrice < currentPrice)
          {
             if(g_trade.OrderModify(ticket, newPrice, 0, 0, ORDER_TIME_GTC, 0))
@@ -381,13 +376,11 @@ void ManageTrailingStopLoss()
 
       if(posType == POSITION_TYPE_SELL)
       {
-         // SL is above the ask price for sell
          double newSL = NormalizeDouble(ask + slDistance, digits);
 
          if(newSL - ask < minDist)
             newSL = NormalizeDouble(ask + minDist + point, digits);
 
-         // Set initial SL or move it down (never up for sell)
          if(currentSL == 0.0 || newSL < currentSL)
          {
             if(g_trade.PositionModify(ticket, newSL, currentTP))
@@ -396,13 +389,11 @@ void ManageTrailingStopLoss()
       }
       else if(posType == POSITION_TYPE_BUY)
       {
-         // SL is below the bid price for buy
          double newSL = NormalizeDouble(bid - slDistance, digits);
 
          if(bid - newSL < minDist)
             newSL = NormalizeDouble(bid - minDist - point, digits);
 
-         // Set initial SL or move it up (never down for buy)
          if(currentSL == 0.0 || newSL > currentSL)
          {
             if(g_trade.PositionModify(ticket, newSL, currentTP))
@@ -486,7 +477,6 @@ void CalcDailyStats()
       }
    }
 
-   // Add unrealized P&L from open positions
    int total = PositionsTotal();
    for(int i = 0; i < total; i++)
    {
@@ -502,74 +492,53 @@ void CalcDailyStats()
 }
 
 //+------------------------------------------------------------------+
-//| Update on-chart display                                           |
+//| Update on-chart display - compact top-right corner                |
 //+------------------------------------------------------------------+
 void UpdateDisplay()
 {
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    long   spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-
-   int yPos = 30;
-   int yStep = 20;
-   color textColor = clrWhite;
-   color labelColor = clrGold;
-   int fontSize = 10;
-   string fontName = "Consolas";
-
-   // Header
-   CreateLabel("GSE_Header", g_eaName, 15, yPos, clrGold, 12, fontName);
-   yPos += yStep + 5;
-
-   CreateLabel("GSE_Sep1", "----------------------------", 15, yPos, clrGray, fontSize, fontName);
-   yPos += yStep;
-
-   // Equity
-   CreateLabel("GSE_Equity", "Equity:              " + DoubleToString(equity, 2), 15, yPos, textColor, fontSize, fontName);
-   yPos += yStep;
-
-   // Total lots traded today
-   CreateLabel("GSE_Lots", "Lots Today:          " + DoubleToString(g_dailyLots, 2), 15, yPos, textColor, fontSize, fontName);
-   yPos += yStep;
-
-   // Daily P&L
-   color pnlColor = (g_dailyPnL >= 0) ? clrLime : clrRed;
-   CreateLabel("GSE_PnL", "P/L Today:           " + DoubleToString(g_dailyPnL, 2), 15, yPos, pnlColor, fontSize, fontName);
-   yPos += yStep;
-
-   // ATR
-   int atrDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   CreateLabel("GSE_ATR", "ATR(" + IntegerToString(InpATRPeriod) + "):            " + DoubleToString(g_atrValue, atrDigits), 15, yPos, textColor, fontSize, fontName);
-   yPos += yStep;
-
-   // Slippage
-   CreateLabel("GSE_Slip", "Slippage:            " + IntegerToString(InpSlippage), 15, yPos, textColor, fontSize, fontName);
-   yPos += yStep;
-
-   // Spread
-   color spreadColor = (InpMaxSpread > 0 && spread > InpMaxSpread) ? clrRed : textColor;
-   CreateLabel("GSE_Spread", "Spread:              " + IntegerToString(spread), 15, yPos, spreadColor, fontSize, fontName);
-   yPos += yStep;
-
-   CreateLabel("GSE_Sep2", "----------------------------", 15, yPos, clrGray, fontSize, fontName);
-   yPos += yStep;
-
-   // EA Status
-   bool active = CheckFilters();
-   string status = active ? "ACTIVE" : "PAUSED";
-   color statusColor = active ? clrLime : clrOrangeRed;
-   CreateLabel("GSE_Status", "Status:              " + status, 15, yPos, statusColor, fontSize, fontName);
-   yPos += yStep;
-
-   // Positions / Orders
-   CreateLabel("GSE_Pos", "Positions:           " + IntegerToString(CountPositions()), 15, yPos, textColor, fontSize, fontName);
-   yPos += yStep;
-
-   CreateLabel("GSE_Ord", "Pending Orders:      " + IntegerToString(CountPendingOrders()), 15, yPos, textColor, fontSize, fontName);
-   yPos += yStep;
-
-   // Trade Mode
+   int    atrDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   bool   active = CheckFilters();
    string mode = (InpTradeMode == TRADE_MODE_SINGLE) ? "Single" : "Multiple";
-   CreateLabel("GSE_Mode", "Trade Mode:          " + mode, 15, yPos, labelColor, fontSize, fontName);
+
+   int xPos = 10;
+   int yPos = 20;
+   int yStep = 16;
+   int fontSize = 9;
+   string fontName = "Consolas";
+   color textColor = clrWhite;
+
+   // All labels anchored to TOP-RIGHT corner
+   CreateLabel("GSE_Header", g_eaName, xPos, yPos, clrGold, 10, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep + 2;
+
+   CreateLabel("GSE_Equity", "Equity:    " + DoubleToString(equity, 2), xPos, yPos, textColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   CreateLabel("GSE_Lots", "Lots:      " + DoubleToString(g_dailyLots, 2), xPos, yPos, textColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   color pnlColor = (g_dailyPnL >= 0) ? clrLime : clrRed;
+   CreateLabel("GSE_PnL", "P/L:       " + DoubleToString(g_dailyPnL, 2), xPos, yPos, pnlColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   CreateLabel("GSE_ATR", "ATR:       " + DoubleToString(g_atrValue, atrDigits), xPos, yPos, textColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   CreateLabel("GSE_Slip", "Slippage:  " + IntegerToString(InpSlippage), xPos, yPos, textColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   color spreadColor = (InpMaxSpread > 0 && spread > InpMaxSpread) ? clrRed : textColor;
+   CreateLabel("GSE_Spread", "Spread:    " + IntegerToString(spread), xPos, yPos, spreadColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   color statusColor = active ? clrLime : clrOrangeRed;
+   string status = active ? "ACTIVE" : "PAUSED";
+   CreateLabel("GSE_Status", "Status:    " + status, xPos, yPos, statusColor, fontSize, fontName, CORNER_RIGHT_UPPER);
+   yPos += yStep;
+
+   CreateLabel("GSE_Mode", "Mode:      " + mode, xPos, yPos, clrGold, fontSize, fontName, CORNER_RIGHT_UPPER);
 
    ChartRedraw(0);
 }
@@ -577,13 +546,14 @@ void UpdateDisplay()
 //+------------------------------------------------------------------+
 //| Create or update a text label on chart                            |
 //+------------------------------------------------------------------+
-void CreateLabel(string name, string text, int x, int y, color clr, int size, string font)
+void CreateLabel(string name, string text, int x, int y, color clr, int size, string font,
+                 ENUM_BASE_CORNER corner = CORNER_RIGHT_UPPER)
 {
    if(ObjectFind(0, name) < 0)
    {
       ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
       ObjectSetInteger(0, name, OBJPROP_BACK, false);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    }
