@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.06"
+#property version   "1.07"
 
 #include <Trade\Trade.mqh>
 
@@ -55,6 +55,10 @@ int            g_lastDay;
 string         g_eaName = "GoldScalpingEA";
 int            g_magicNumber = 123456;
 CTrade         g_trade;
+datetime       g_lastModifyTime;     // Throttle order modifications
+double         g_lastBid;            // Track last bid for minimum move
+double         g_lastAsk;            // Track last ask for minimum move
+int            g_minMovePts = 5;     // Minimum points before modifying orders
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -83,7 +87,11 @@ int OnInit()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
       Print("WARNING: Algo Trading is NOT enabled! Enable it in MT5 toolbar and EA properties.");
 
-   Print(g_eaName, " v1.06 initialized. TimeFilter=", InpTimeFilter,
+   g_lastModifyTime = 0;
+   g_lastBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   g_lastAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   Print(g_eaName, " v1.07 initialized. TimeFilter=", InpTimeFilter,
          " TradeMode=", EnumToString(InpTradeMode),
          " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
@@ -123,12 +131,33 @@ void OnTick()
    if(CopyBuffer(g_atrHandle, 0, 0, 1, atrBuf) > 0)
       g_atrValue = atrBuf[0];
 
-   // --- Calculate daily P&L ---
-   CalcDailyStats();
+   // --- Calculate daily P&L (only every 5 seconds to reduce load) ---
+   static datetime lastStatsTime = 0;
+   if(TimeCurrent() - lastStatsTime >= 5)
+   {
+      CalcDailyStats();
+      lastStatsTime = TimeCurrent();
+   }
 
-   // --- Update chart display ---
-   if(InpDisplayText)
+   // --- Update chart display (only every 2 seconds) ---
+   static datetime lastDisplayTime = 0;
+   if(InpDisplayText && TimeCurrent() - lastDisplayTime >= 2)
+   {
       UpdateDisplay();
+      lastDisplayTime = TimeCurrent();
+   }
+
+   // --- Check if price has moved enough to warrant order modifications ---
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double minMove = g_minMovePts * point;
+
+   bool priceMovedEnough = (MathAbs(currentBid - g_lastBid) >= minMove ||
+                            MathAbs(currentAsk - g_lastAsk) >= minMove);
+
+   // --- Throttle: minimum 1 second between order modifications ---
+   bool cooldownPassed = (TimeCurrent() - g_lastModifyTime >= 1);
 
    // --- Check filters ---
    bool filtersPass = CheckFilters();
@@ -137,13 +166,20 @@ void OnTick()
    int openPositions = CountPositions();
    int pendingOrders = CountPendingOrders();
 
-   // --- Manage open positions (trailing SL) ---
-   if(openPositions > 0)
+   // --- Manage open positions (trailing SL) - only when price moved enough ---
+   if(openPositions > 0 && priceMovedEnough && cooldownPassed)
       ManageTrailingStopLoss();
 
-   // --- Manage pending orders (trail them) ---
-   if(pendingOrders > 0)
+   // --- Manage pending orders (trail them) - only when price moved enough ---
+   if(pendingOrders > 0 && priceMovedEnough && cooldownPassed)
       TrailPendingOrders();
+
+   // Update last price after processing
+   if(priceMovedEnough)
+   {
+      g_lastBid = currentBid;
+      g_lastAsk = currentAsk;
+   }
 
    // --- Place new pending orders if filters pass ---
    if(!filtersPass)
@@ -326,7 +362,10 @@ void TrailPendingOrders()
          if(newPrice > currentPrice)
          {
             if(g_trade.OrderModify(ticket, newPrice, 0, 0, ORDER_TIME_GTC, 0))
+            {
                Print("Sell-stop trailed up to ", newPrice);
+               g_lastModifyTime = TimeCurrent();
+            }
          }
       }
       else if(orderType == ORDER_TYPE_BUY_STOP)
@@ -339,7 +378,10 @@ void TrailPendingOrders()
          if(newPrice < currentPrice)
          {
             if(g_trade.OrderModify(ticket, newPrice, 0, 0, ORDER_TIME_GTC, 0))
+            {
                Print("Buy-stop trailed down to ", newPrice);
+               g_lastModifyTime = TimeCurrent();
+            }
          }
       }
    }
@@ -380,8 +422,15 @@ void ManageTrailingStopLoss()
 
          if(currentSL == 0.0 || newSL < currentSL)
          {
-            if(g_trade.PositionModify(ticket, newSL, currentTP))
-               Print("Sell trailing SL moved to ", newSL);
+            // Only modify if SL change is significant (> minMovePts)
+            if(currentSL == 0.0 || MathAbs(currentSL - newSL) >= g_minMovePts * point)
+            {
+               if(g_trade.PositionModify(ticket, newSL, currentTP))
+               {
+                  Print("Sell trailing SL moved to ", newSL);
+                  g_lastModifyTime = TimeCurrent();
+               }
+            }
          }
       }
       else if(posType == POSITION_TYPE_BUY)
@@ -393,8 +442,14 @@ void ManageTrailingStopLoss()
 
          if(currentSL == 0.0 || newSL > currentSL)
          {
-            if(g_trade.PositionModify(ticket, newSL, currentTP))
-               Print("Buy trailing SL moved to ", newSL);
+            if(currentSL == 0.0 || MathAbs(newSL - currentSL) >= g_minMovePts * point)
+            {
+               if(g_trade.PositionModify(ticket, newSL, currentTP))
+               {
+                  Print("Buy trailing SL moved to ", newSL);
+                  g_lastModifyTime = TimeCurrent();
+               }
+            }
          }
       }
    }
