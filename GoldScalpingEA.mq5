@@ -4,7 +4,7 @@
 //|                                     Trailing Pending Order Logic  |
 //+------------------------------------------------------------------+
 #property copyright "GoldScalpingEA"
-#property version   "1.08"
+#property version   "1.09"
 
 #include <Trade\Trade.mqh>
 
@@ -91,7 +91,7 @@ int OnInit()
    g_lastBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    g_lastAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-   Print(g_eaName, " v1.08 initialized. Magic=", InpMagicNumber, " TimeFilter=", InpTimeFilter,
+   Print(g_eaName, " v1.09 initialized. Magic=", InpMagicNumber, " TimeFilter=", InpTimeFilter,
          " TradeMode=", EnumToString(InpTradeMode),
          " Lot=", InpLotSize, " TrailPt=", InpBuySellTrailingPt, " SLPt=", InpStopLossTrailingPt);
    return(INIT_SUCCEEDED);
@@ -215,14 +215,21 @@ void OnTick()
    }
    else
    {
-      // Multiple: place BOTH buy-stop and sell-stop (bracket/straddle)
-      // Buy-stop above price + Sell-stop below price simultaneously
-      bool hasBuyStop  = HasPendingOrderType(ORDER_TYPE_BUY_STOP);
-      bool hasSellStop = HasPendingOrderType(ORDER_TYPE_SELL_STOP);
+      // Multiple: place buy-stop AND sell-stop (bracket)
+      // But only if there's no open position on that side already
+      bool hasBuyStop   = HasPendingOrderType(ORDER_TYPE_BUY_STOP);
+      bool hasSellStop  = HasPendingOrderType(ORDER_TYPE_SELL_STOP);
+      bool hasBuyPos    = HasPositionType(POSITION_TYPE_BUY);
+      bool hasSellPos   = HasPositionType(POSITION_TYPE_SELL);
 
-      if(!hasBuyStop || !hasSellStop)
+      // Don't place buy-stop if already have a buy position open
+      // Don't place sell-stop if already have a sell position open
+      bool needBuyStop  = (!hasBuyStop && !hasBuyPos);
+      bool needSellStop = (!hasSellStop && !hasSellPos);
+
+      if(needBuyStop || needSellStop)
       {
-         PlaceBracketOrders(hasBuyStop, hasSellStop);
+         PlaceBracketOrders(!needBuyStop, !needSellStop);
       }
    }
 }
@@ -506,6 +513,26 @@ bool HasPendingOrderType(ENUM_ORDER_TYPE checkType)
 
       ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(orderType == checkType)
+         return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if a specific position type exists                          |
+//+------------------------------------------------------------------+
+bool HasPositionType(ENUM_POSITION_TYPE checkType)
+{
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(posType == checkType)
          return true;
    }
    return false;
